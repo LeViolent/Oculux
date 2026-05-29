@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Oculux — Accès Essai</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <link rel="stylesheet" href="player.css">
+</head>
+<body>
+
+  <!-- ÉCRAN DE CONNEXION -->
+  <div id="login-screen">
+    <div class="login-box">
+      <div class="logo">OC<span>U</span>LUX</div>
+      <p class="login-subtitle">Entrez vos identifiants d'essai reçus sur WhatsApp</p>
+      <div class="input-group">
+        <i class="ti ti-user"></i>
+        <input type="text" id="username" placeholder="Nom d'utilisateur" autocomplete="off"/>
+      </div>
+      <div class="input-group">
+        <i class="ti ti-lock"></i>
+        <input type="password" id="password" placeholder="Mot de passe" autocomplete="off"/>
+      </div>
+      <button class="login-btn" onclick="login()">
+        <i class="ti ti-player-play"></i> Accéder au contenu
+      </button>
+      <p id="login-error" class="login-error"></p>
+      <a href="index.html" class="back-link">← Retour à l'accueil</a>
+    </div>
+  </div>
+
+  <!-- ÉCRAN PLAYER -->
+  <div id="player-screen" style="display:none">
+    <div class="sidebar">
+      <div class="sidebar-logo">OC<span>U</span>LUX</div>
+
+      <div class="session-timer">
+        <i class="ti ti-clock"></i>
+        <span id="timer">12:00:00</span>
+      </div>
+
+      <div class="search-box">
+        <i class="ti ti-search"></i>
+        <input type="text" id="search" placeholder="Rechercher..." oninput="filterChannels()"/>
+      </div>
+
+      <div id="categories" class="categories"></div>
+    </div>
+
+    <div class="main">
+      <div class="channel-list" id="channel-list"></div>
+      <div class="video-area">
+        <video id="video" controls autoplay></video>
+        <div id="now-playing" class="now-playing">Sélectionnez une chaîne</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ÉCRAN EXPIRÉ -->
+  <div id="expired-screen" style="display:none">
+    <div class="expired-box">
+      <i class="ti ti-clock-off"></i>
+      <h2>Votre essai a expiré</h2>
+      <p>Vous avez profité de 12h d'accès gratuit.<br>Continuez avec l'une de nos offres !</p>
+      <button class="login-btn" onclick="openWhatsApp()">
+        <i class="ti ti-brand-whatsapp"></i> Souscrire via WhatsApp
+      </button>
+      <a href="index.html" class="back-link">← Retour à l'accueil</a>
+    </div>
+  </div>
+
+  <script>
+    const SESSION_DURATION = 12 * 60 * 60 * 1000; // 12h en ms
+    let allChannels = [];
+    let currentCategory = null;
+
+    // LOGIN
+    async function login() {
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value.trim();
+      const error = document.getElementById('login-error');
+
+      if (!username || !password) {
+        error.textContent = 'Veuillez remplir tous les champs.';
+        return;
+      }
+
+      error.textContent = 'Connexion en cours...';
+
+      try {
+        const res = await fetch(`/api/proxy?username=${username}&password=${password}&action=get_live_categories`);
+        const data = await res.json();
+
+        if (!data || data.error || !Array.isArray(data)) {
+          error.textContent = 'Identifiants incorrects. Vérifiez et réessayez.';
+          return;
+        }
+
+        // Sauvegarde session
+        const session = {
+          username,
+          password,
+          loginTime: Date.now(),
+          expiresAt: Date.now() + SESSION_DURATION
+        };
+        localStorage.setItem('oculux_session', JSON.stringify(session));
+
+        startPlayer(username, password, data);
+      } catch (e) {
+        error.textContent = 'Erreur de connexion. Réessayez.';
+      }
+    }
+
+    // DÉMARRER LE PLAYER
+    async function startPlayer(username, password, categories) {
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('player-screen').style.display = 'flex';
+
+      // Afficher catégories
+      const catDiv = document.getElementById('categories');
+      catDiv.innerHTML = '';
+
+      const allBtn = document.createElement('div');
+      allBtn.className = 'cat-item active';
+      allBtn.textContent = 'Toutes les chaînes';
+      allBtn.onclick = () => loadChannels(username, password, null, allBtn);
+      catDiv.appendChild(allBtn);
+
+      categories.forEach(cat => {
+        const div = document.createElement('div');
+        div.className = 'cat-item';
+        div.textContent = cat.category_name;
+        div.onclick = () => loadChannels(username, password, cat.category_id, div);
+        catDiv.appendChild(div);
+      });
+
+      // Charger toutes les chaînes
+      await loadChannels(username, password, null, allBtn);
+
+      // Démarrer timer
+      startTimer();
+    }
+
+    // CHARGER CHAÎNES
+    async function loadChannels(username, password, categoryId, btn) {
+      currentCategory = categoryId;
+
+      document.querySelectorAll('.cat-item').forEach(el => el.classList.remove('active'));
+      btn.classList.add('active');
+
+      const list = document.getElementById('channel-list');
+      list.innerHTML = '<div class="loading"><i class="ti ti-loader"></i> Chargement...</div>';
+
+      const url = categoryId
+        ? `/api/proxy?username=${username}&password=${password}&action=get_live_streams&category_id=${categoryId}`
+        : `/api/proxy?username=${username}&password=${password}&action=get_live_streams`;
+
+      const res = await fetch(url);
+      allChannels = await res.json();
+      renderChannels(allChannels, username, password);
+    }
+
+    // AFFICHER CHAÎNES
+    function renderChannels(channels, username, password) {
+      const session = JSON.parse(localStorage.getItem('oculux_session'));
+      const list = document.getElementById('channel-list');
+      list.innerHTML = '';
+
+      if (!channels || channels.length === 0) {
+        list.innerHTML = '<div class="loading">Aucune chaîne disponible</div>';
+        return;
+      }
+
+      channels.forEach(ch => {
+        const div = document.createElement('div');
+        div.className = 'channel-item';
+        div.innerHTML = `
+          ${ch.stream_icon ? `<img src="${ch.stream_icon}" onerror="this.style.display='none'"/>` : '<i class="ti ti-tv"></i>'}
+          <span>${ch.name}</span>
+        `;
+        div.onclick = () => playChannel(ch, session.username, session.password);
+        list.appendChild(div);
+      });
+    }
+
+    // JOUER UNE CHAÎNE
+    function playChannel(ch, username, password) {
+      document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+
+      document.getElementById('now-playing').textContent = ch.name;
+
+      const streamUrl = `/api/stream?username=${username}&password=${password}&stream_id=${ch.stream_id}&type=live`;
+      const video = document.getElementById('video');
+
+      if (Hls.isSupported()) {
+        const hls = new Hls();
+        hls.loadSource(streamUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = streamUrl;
+        video.play();
+      }
+    }
+
+    // RECHERCHE
+    function filterChannels() {
+      const q = document.getElementById('search').value.toLowerCase();
+      const session = JSON.parse(localStorage.getItem('oculux_session'));
+      const filtered = allChannels.filter(ch => ch.name.toLowerCase().includes(q));
+      renderChannels(filtered, session.username, session.password);
+    }
+
+    // TIMER
+    function startTimer() {
+      const session = JSON.parse(localStorage.getItem('oculux_session'));
+      const interval = setInterval(() => {
+        const remaining = session.expiresAt - Date.now();
+        if (remaining <= 0) {
+          clearInterval(interval);
+          localStorage.removeItem('oculux_session');
+          document.getElementById('player-screen').style.display = 'none';
+          document.getElementById('expired-screen').style.display = 'flex';
+          return;
+        }
+        const h = Math.floor(remaining / 3600000);
+        const m = Math.floor((remaining % 3600000) / 60000);
+        const s = Math.floor((remaining % 60000) / 1000);
+        document.getElementById('timer').textContent =
+          `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+      }, 1000);
+    }
+
+    // WHATSAPP
+    function openWhatsApp() {
+      const message = encodeURIComponent("Bonjour, je voudrais souscrire à Oculux 👋");
+      window.open(`https://wa.me/237658340720?text=${message}`, '_blank');
+    }
+
+    // VÉRIFIER SESSION AU CHARGEMENT
+    window.onload = () => {
+      const session = JSON.parse(localStorage.getItem('oculux_session'));
+      if (!session) return;
+
+      if (Date.now() > session.expiresAt) {
+        localStorage.removeItem('oculux_session');
+        document.getElementById('login-screen').style.display = 'none';
+        document.getElementById('expired-screen').style.display = 'flex';
+        return;
+      }
+
+      fetch(`/api/proxy?username=${session.username}&password=${session.password}&action=get_live_categories`)
+        .then(r => r.json())
+        .then(data => {
+          if (Array.isArray(data)) startPlayer(session.username, session.password, data);
+        });
+    };
+  </script>
+</body>
+</html>
